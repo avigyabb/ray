@@ -234,6 +234,7 @@ from ray.util.scheduling_strategies import (
     DoesNotExist,
 )
 import ray._private.ray_constants as ray_constants
+import ray._private.numa_affinity
 import ray.cloudpickle as ray_pickle
 from ray.core.generated.common_pb2 import ActorDiedErrorContext
 from ray.core.generated.gcs_service_pb2 import GetAllResourceUsageReply
@@ -2351,9 +2352,16 @@ cdef execute_task_with_cancellation_handler(
     if (<int>task_type != <int>TASK_TYPE_ACTOR_TASK):
         original_visible_accelerator_env_vars = ray._private.utils.set_visible_accelerator_ids()
         omp_num_threads_overriden = ray._private.utils.set_omp_num_threads_if_unset()
+        # Pin the worker's CPU affinity to the cores local to its GPUs (NUMA
+        # affinity). For actor creation tasks this binds the actor once for its
+        # lifetime; for normal tasks it is restored below. No-ops unless opted
+        # in via RAY_EXPERIMENTAL_GPU_NUMA_AFFINITY and the worker has GPUs.
+        original_cpu_affinity = (
+            ray._private.numa_affinity.maybe_bind_worker_to_gpu_numa())
     else:
         original_visible_accelerator_env_vars = None
         omp_num_threads_overriden = False
+        original_cpu_affinity = None
 
     # Initialize the actor if this is an actor creation task. We do this here
     # before setting the current task ID so that we can get the execution info,
@@ -2463,6 +2471,10 @@ cdef execute_task_with_cancellation_handler(
             if omp_num_threads_overriden:
                 # Reset the OMP_NUM_THREADS environ if it was set.
                 os.environ.pop("OMP_NUM_THREADS", None)
+            if original_cpu_affinity is not None:
+                # Restore CPU affinity for normal tasks, since the worker may be
+                # reused for a task with a different GPU assignment.
+                ray._private.numa_affinity.reset_cpu_affinity(original_cpu_affinity)
 
 
     if execution_info.max_calls != 0:
