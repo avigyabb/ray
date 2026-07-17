@@ -25,6 +25,15 @@
 
 namespace ray {
 
+/// NUMA-affinity scheduling mode for a resource request. Controls how GPU
+/// instances co-located on the same NUMA node / CPU socket are selected.
+///   kNone   - topology is ignored; legacy first-fit behavior.
+///   kSoft   - prefer a single NUMA node, but fall back to first-fit if no
+///             single node can satisfy the demand.
+///   kStrict - only allocate when a single NUMA node can satisfy the demand;
+///             otherwise fail (the lease stays pending until it can be met).
+enum class NumaAffinityMode { kNone = 0, kSoft = 1, kStrict = 2 };
+
 /// Represents a node resource set that contains the per-instance resource values.
 class NodeResourceInstanceSet {
  public:
@@ -59,8 +68,24 @@ class NodeResourceInstanceSet {
   /// Try to allocate resources specified by `resource_demands`.
   /// This operation is all or nothing meaning that if any single resource
   /// cannot be allocated, the entire allocation fails and std::nullopt is returned.
+  ///
+  /// \param numa_mode When not kNone, multi-instance resources with a known
+  /// per-instance NUMA topology (see SetInstanceNumaNodes) are allocated from a
+  /// single NUMA node when possible. In kStrict mode allocation fails if no
+  /// single node can satisfy the demand; in kSoft mode it falls back to legacy
+  /// first-fit. Resources without a known topology always use legacy behavior.
   std::optional<absl::flat_hash_map<ResourceID, std::vector<FixedPoint>>> TryAllocate(
-      const ResourceSet &resource_demands);
+      const ResourceSet &resource_demands,
+      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
+
+  /// Set the per-instance NUMA node ids for a resource (parallel to the
+  /// instance vector returned by Get). Passing an empty vector clears the
+  /// topology, restoring legacy allocation for that resource.
+  void SetInstanceNumaNodes(ResourceID resource_id, std::vector<int64_t> numa_nodes);
+
+  /// Get the per-instance NUMA node ids for a resource, or an empty vector if
+  /// no topology is known.
+  const std::vector<int64_t> &GetInstanceNumaNodes(ResourceID resource_id) const;
 
   /// Free allocated resources and add them back to this set.
   void Free(ResourceID resource_id, const std::vector<FixedPoint> &allocation);
@@ -147,8 +172,31 @@ class NodeResourceInstanceSet {
   /// \param demand: The resource amount to be allocated.
   ///
   /// \return the allocated instances, if allocation successful. Else, return nullopt.
-  std::optional<std::vector<FixedPoint>> TryAllocate(ResourceID resource_id,
-                                                     FixedPoint demand);
+  std::optional<std::vector<FixedPoint>> TryAllocate(
+      ResourceID resource_id,
+      FixedPoint demand,
+      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
+
+  /// Try to satisfy `demand` for a multi-instance resource from a single NUMA
+  /// node, given the per-instance NUMA node ids (parallel to `available`).
+  /// Returns the chosen allocation (parallel to `available`, zero for
+  /// non-selected instances) or nullopt if no single node can satisfy `demand`.
+  /// Among satisfying nodes, prefers the one with the most available capacity
+  /// (deterministic tie-break by smallest node id); within a node the fractional
+  /// remainder uses the same best-fit rule as legacy allocation.
+  std::optional<std::vector<FixedPoint>> SelectNumaColocatedInstances(
+      const std::vector<FixedPoint> &available,
+      const std::vector<int64_t> &numa_nodes,
+      FixedPoint demand) const;
+
+  /// Try to satisfy `demand` using only the given instance `indices` of
+  /// `available`, mirroring legacy semantics: allocate whole unit-capacity
+  /// instances first, then best-fit the fractional remainder. Does not mutate
+  /// `available`. Returns nullopt if `indices` cannot satisfy `demand`.
+  std::optional<std::vector<FixedPoint>> AllocateWithinIndices(
+      const std::vector<FixedPoint> &available,
+      const std::vector<size_t> &indices,
+      FixedPoint demand) const;
 
   /// Allocate resource to the resource_id based on a provided reference allocation.
   /// The function is used for placement group allocation. Making the allocation of
@@ -165,6 +213,11 @@ class NodeResourceInstanceSet {
 
   /// Map from the resource IDs to the resource instance values.
   absl::flat_hash_map<ResourceID, std::vector<FixedPoint>> resources_;
+
+  /// Optional per-instance NUMA node ids, parallel to the instance vector in
+  /// resources_. Only populated for resources with a known topology (e.g. GPU).
+  /// When absent for a resource, allocation falls back to legacy behavior.
+  absl::flat_hash_map<ResourceID, std::vector<int64_t>> instance_numa_nodes_;
 
   /// This is a derived map from the resources_ map. The map aggregates all the current
   /// placement group indexed resources in resources_ by their original resource id and

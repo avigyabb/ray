@@ -137,7 +137,8 @@ bool NodeResourceInstanceSet::operator==(const NodeResourceInstanceSet &other) c
 }
 
 std::optional<absl::flat_hash_map<ResourceID, std::vector<FixedPoint>>>
-NodeResourceInstanceSet::TryAllocate(const ResourceSet &resource_demands) {
+NodeResourceInstanceSet::TryAllocate(const ResourceSet &resource_demands,
+                                     NumaAffinityMode numa_mode) {
   absl::flat_hash_map<ResourceID, std::vector<FixedPoint>> allocations;
 
   // During resource allocation with a placement group, no matter whether the allocation
@@ -193,8 +194,11 @@ NodeResourceInstanceSet::TryAllocate(const ResourceSet &resource_demands) {
       ResourceID original_resource_id{data->original_resource};
       pg_resource_map[original_resource_id].emplace_back(resource_id, data.value());
     } else {
-      // Directly allocate the resources if the resource is not with a placement group
-      auto allocation = TryAllocate(resource_id, demand);
+      // Directly allocate the resources if the resource is not with a placement group.
+      // NUMA-aware selection only applies to non-placement-group resources; PG
+      // resources retain legacy allocation (topology is keyed by the plain
+      // resource id, not the PG-indexed/wildcard ids).
+      auto allocation = TryAllocate(resource_id, demand, numa_mode);
       if (allocation) {
         // Even if allocation failed we need to remember partial allocations to
         // correctly free resources.
@@ -293,7 +297,7 @@ NodeResourceInstanceSet::TryAllocate(const ResourceSet &resource_demands) {
 }
 
 std::optional<std::vector<FixedPoint>> NodeResourceInstanceSet::TryAllocate(
-    ResourceID resource_id, FixedPoint demand) {
+    ResourceID resource_id, FixedPoint demand, NumaAffinityMode numa_mode) {
   std::vector<FixedPoint> available = Get(resource_id);
   if (available.empty()) {
     return std::nullopt;
@@ -313,6 +317,32 @@ std::optional<std::vector<FixedPoint>> NodeResourceInstanceSet::TryAllocate(
       // Not enough capacity.
       return std::nullopt;
     }
+  }
+
+  // NUMA-aware selection for multi-instance resources (e.g. GPUs). When a mode
+  // is requested and a per-instance topology is known, try to satisfy the whole
+  // demand from a single NUMA node so the worker's GPUs share a CPU socket.
+  if (numa_mode != NumaAffinityMode::kNone) {
+    const std::vector<int64_t> &numa_nodes = GetInstanceNumaNodes(resource_id);
+    if (numa_nodes.size() == available.size()) {
+      std::optional<std::vector<FixedPoint>> numa_allocation =
+          SelectNumaColocatedInstances(available, numa_nodes, demand);
+      if (numa_allocation) {
+        for (size_t i = 0; i < available.size(); i++) {
+          available[i] -= (*numa_allocation)[i];
+        }
+        Set(resource_id, std::move(available));
+        return numa_allocation;
+      }
+      if (numa_mode == NumaAffinityMode::kStrict) {
+        // No single NUMA node can satisfy the demand. Fail so the lease stays
+        // pending rather than allocating a cross-socket GPU set.
+        return std::nullopt;
+      }
+      // kSoft: fall through to legacy first-fit below.
+    }
+    // Unknown or mismatched topology: fail open to legacy allocation, even in
+    // strict mode, so non-NUMA nodes don't pend forever.
   }
 
   // If resources has multiple instances, each instance has total capacity of 1.
@@ -364,6 +394,116 @@ std::optional<std::vector<FixedPoint>> NodeResourceInstanceSet::TryAllocate(
 
   Set(resource_id, std::move(available));
   return std::make_optional<std::vector<FixedPoint>>(std::move(allocation));
+}
+
+void NodeResourceInstanceSet::SetInstanceNumaNodes(ResourceID resource_id,
+                                                   std::vector<int64_t> numa_nodes) {
+  if (numa_nodes.empty()) {
+    instance_numa_nodes_.erase(resource_id);
+  } else {
+    instance_numa_nodes_[resource_id] = std::move(numa_nodes);
+  }
+}
+
+const std::vector<int64_t> &NodeResourceInstanceSet::GetInstanceNumaNodes(
+    ResourceID resource_id) const {
+  static const std::vector<int64_t> kEmpty;
+  auto it = instance_numa_nodes_.find(resource_id);
+  if (it == instance_numa_nodes_.end()) {
+    return kEmpty;
+  }
+  return it->second;
+}
+
+std::optional<std::vector<FixedPoint>>
+NodeResourceInstanceSet::AllocateWithinIndices(
+    const std::vector<FixedPoint> &available,
+    const std::vector<size_t> &indices,
+    FixedPoint demand) const {
+  std::vector<FixedPoint> allocation(available.size());
+  FixedPoint remaining_demand = demand;
+
+  // Allocate full unit-capacity instances (available == 1) in index order,
+  // matching legacy semantics.
+  if (remaining_demand >= 1.) {
+    for (size_t idx : indices) {
+      if (available[idx] == 1.) {
+        allocation[idx] = 1.;
+        remaining_demand -= 1.;
+      }
+      if (remaining_demand < 1.) {
+        break;
+      }
+    }
+  }
+
+  if (remaining_demand >= 1.) {
+    // Not enough whole unit-capacity instances within these indices.
+    return std::nullopt;
+  }
+
+  // Best-fit the fractional remainder among these indices: pick the instance
+  // with the smallest available capacity that still satisfies the remainder.
+  if (remaining_demand > 0.) {
+    int64_t idx_best_fit = -1;
+    FixedPoint available_best_fit = 1.;
+    for (size_t idx : indices) {
+      if (allocation[idx] > 0) {
+        // Already consumed as a full unit.
+        continue;
+      }
+      if (available[idx] >= remaining_demand) {
+        if (idx_best_fit == -1 ||
+            (available[idx] - remaining_demand < available_best_fit)) {
+          available_best_fit = available[idx] - remaining_demand;
+          idx_best_fit = static_cast<int64_t>(idx);
+        }
+      }
+    }
+    if (idx_best_fit == -1) {
+      return std::nullopt;
+    }
+    allocation[static_cast<size_t>(idx_best_fit)] = remaining_demand;
+  }
+
+  return std::make_optional<std::vector<FixedPoint>>(std::move(allocation));
+}
+
+std::optional<std::vector<FixedPoint>>
+NodeResourceInstanceSet::SelectNumaColocatedInstances(
+    const std::vector<FixedPoint> &available,
+    const std::vector<int64_t> &numa_nodes,
+    FixedPoint demand) const {
+  // Group instance indices by NUMA node.
+  absl::flat_hash_map<int64_t, std::vector<size_t>> node_to_indices;
+  for (size_t i = 0; i < available.size(); i++) {
+    node_to_indices[numa_nodes[i]].push_back(i);
+  }
+
+  // Among nodes that can satisfy the demand, prefer the one with the most
+  // available capacity, with a deterministic tie-break by smallest node id
+  // (flat_hash_map iteration order is unspecified).
+  std::optional<std::vector<FixedPoint>> best_allocation;
+  FixedPoint best_free = FixedPoint(0);
+  int64_t best_node = 0;
+  for (const auto &[node, indices] : node_to_indices) {
+    std::optional<std::vector<FixedPoint>> node_allocation =
+        AllocateWithinIndices(available, indices, demand);
+    if (!node_allocation) {
+      continue;
+    }
+    FixedPoint node_free = FixedPoint(0);
+    for (size_t idx : indices) {
+      node_free += available[idx];
+    }
+    if (!best_allocation || node_free > best_free ||
+        (node_free == best_free && node < best_node)) {
+      best_allocation = std::move(node_allocation);
+      best_free = node_free;
+      best_node = node;
+    }
+  }
+  return best_allocation;
 }
 
 void NodeResourceInstanceSet::AllocateWithReference(

@@ -984,4 +984,137 @@ TEST_F(NodeResourceInstanceSetTest, TestToNodeResourceSet) {
   ASSERT_EQ(r1.ToNodeResourceSet(), NodeResourceSet({{"CPU", 2}, {"GPU", 2}}));
 }
 
+// Helper: 4-GPU node with GPUs 0,1 on NUMA node 0 and GPUs 2,3 on NUMA node 1,
+// with a caller-specified per-instance availability.
+namespace {
+NodeResourceInstanceSet MakeNumaGpuNode(std::vector<FixedPoint> available) {
+  NodeResourceInstanceSet r(NodeResourceSet({{"GPU", 4}}));
+  r.Set(ResourceID("GPU"), std::move(available));
+  r.SetInstanceNumaNodes(ResourceID("GPU"), std::vector<int64_t>({0, 0, 1, 1}));
+  return r;
+}
+}  // namespace
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaSoftPrefersColocatedGpus) {
+  // GPU 1 is busy, so first-fit would cross NUMA nodes (pick 0 and 2). Soft mode
+  // should instead pick the co-located pair on node 1 (GPUs 2,3).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(0), FixedPoint(1), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(2)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kSoft);
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(0), FixedPoint(0), FixedPoint(1), FixedPoint(1)}));
+  ASSERT_EQ(
+      r.Get(ResourceID("GPU")),
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(0)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNoneModeIgnoresTopology) {
+  // Same layout as above but with mode kNone (the default): legacy first-fit
+  // crosses NUMA nodes (GPUs 0 and 2).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(0), FixedPoint(1), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(2)}});
+  auto allocations = r.TryAllocate(request);  // default kNone
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0), FixedPoint(1), FixedPoint(0)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaMostFreeTieBreak) {
+  // Both nodes can satisfy demand 1; node 0 has 2 free, node 1 has 1 free.
+  // Most-free tie-break should choose node 0 (GPU 0).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(1), FixedPoint(0), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(1)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kSoft);
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(0)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaStrictPendsWhenNotColocatable) {
+  // One free GPU per node; demand 2 cannot be satisfied within a single node.
+  // Strict mode must fail and leave the node untouched (lease stays pending).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(2)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kStrict);
+  ASSERT_FALSE(allocations);
+  ASSERT_EQ(
+      r.Get(ResourceID("GPU")),
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(1)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaSoftFallsBackCrossNode) {
+  // Same un-colocatable layout: soft mode falls back to legacy first-fit and
+  // allocates the two free GPUs across nodes (GPUs 0 and 3).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(2)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kSoft);
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0), FixedPoint(0), FixedPoint(1)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaFractionalWithinNode) {
+  // demand 1.5 must take one full GPU plus half of another, both in one node.
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(1), FixedPoint(1), FixedPoint(1), FixedPoint(1)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(1.5)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kStrict);
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(0.5), FixedPoint(0), FixedPoint(0)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaTwoHalvesDoNotSatisfyWhole) {
+  // Each node has only two half-GPUs; a 1.0 request cannot be built from two
+  // 0.5 slots, so strict fails (matching legacy whole-unit semantics).
+  NodeResourceInstanceSet r = MakeNumaGpuNode(
+      {FixedPoint(0.5), FixedPoint(0.5), FixedPoint(0.5), FixedPoint(0.5)});
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(1)}});
+  ASSERT_FALSE(r.TryAllocate(request, NumaAffinityMode::kStrict));
+  // Soft also cannot satisfy 1.0 from halves (legacy fallback also fails).
+  ASSERT_FALSE(r.TryAllocate(request, NumaAffinityMode::kSoft));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestNumaFailsOpenWithoutTopology) {
+  // No topology set: strict mode must fall open to legacy allocation rather
+  // than pend forever (non-NUMA / topology-unavailable nodes).
+  NodeResourceInstanceSet r(NodeResourceSet({{"GPU", 4}}));
+  ResourceSet request = ResourceSet({{"GPU", FixedPoint(2)}});
+  auto allocations = r.TryAllocate(request, NumaAffinityMode::kStrict);
+  ASSERT_TRUE(allocations);
+  ASSERT_EQ(
+      (*allocations)[ResourceID("GPU")],
+      std::vector<FixedPoint>(
+          {FixedPoint(1), FixedPoint(1), FixedPoint(0), FixedPoint(0)}));
+}
+
+TEST_F(NodeResourceInstanceSetTest, TestSetInstanceNumaNodesClearAndGet) {
+  NodeResourceInstanceSet r(NodeResourceSet({{"GPU", 2}}));
+  ASSERT_TRUE(r.GetInstanceNumaNodes(ResourceID("GPU")).empty());
+  r.SetInstanceNumaNodes(ResourceID("GPU"), std::vector<int64_t>({0, 1}));
+  ASSERT_EQ(r.GetInstanceNumaNodes(ResourceID("GPU")),
+            std::vector<int64_t>({0, 1}));
+  // Empty vector clears the topology.
+  r.SetInstanceNumaNodes(ResourceID("GPU"), std::vector<int64_t>({}));
+  ASSERT_TRUE(r.GetInstanceNumaNodes(ResourceID("GPU")).empty());
+}
+
 }  // namespace ray
