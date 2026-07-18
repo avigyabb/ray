@@ -118,6 +118,80 @@ def compute_gpu_local_cpu_set(
     return local_cpus
 
 
+def parse_cpu_list(cpu_list: str) -> Set[int]:
+    """Parse a Linux cpulist string like '0-3,8,10-11' into a set of CPU ids."""
+    cpus: Set[int] = set()
+    for part in cpu_list.strip().split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-")
+            cpus.update(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def get_cpu_to_numa_node(
+    sysfs_root: str = "/sys/devices/system/node",
+) -> Dict[int, int]:
+    """Map logical CPU id -> NUMA node id by reading sysfs. ``{}`` if unavailable
+    (fail-open on non-NUMA hosts or containers without sysfs)."""
+    result: Dict[int, int] = {}
+    try:
+        entries = os.listdir(sysfs_root)
+    except OSError:
+        return result
+    for entry in entries:
+        if not entry.startswith("node") or not entry[len("node") :].isdigit():
+            continue
+        node_id = int(entry[len("node") :])
+        cpulist_path = os.path.join(sysfs_root, entry, "cpulist")
+        try:
+            with open(cpulist_path) as f:
+                cpu_list = f.read()
+        except OSError:
+            continue
+        for cpu in parse_cpu_list(cpu_list):
+            result[cpu] = node_id
+    return result
+
+
+def get_gpu_numa_nodes_via_nvml() -> Dict[str, int]:
+    """Map GPU index (string) -> NUMA node id via NVML. ``{}`` on failure.
+
+    GPUs whose NUMA node is unknown (NVML returns a negative id) are omitted so
+    the raylet only receives entries it can act on.
+    """
+    result: Dict[str, int] = {}
+    try:
+        import ray._private.thirdparty.pynvml as pynvml
+    except Exception:  # noqa: BLE001
+        return result
+    try:
+        pynvml.nvmlInit()
+    except Exception:  # noqa: BLE001
+        return result
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+        for i in range(count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            try:
+                node = int(pynvml.nvmlDeviceGetNumaNodeId(handle))
+            except Exception:  # noqa: BLE001
+                continue
+            if node >= 0:
+                result[str(i)] = node
+    except Exception:  # noqa: BLE001
+        result = {}
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
 def get_gpu_cpu_affinity_via_nvml(num_cpus: Optional[int] = None) -> GpuToCpuMap:
     """Query NVML for each GPU's local CPU set. Returns ``{}`` on any failure."""
     result: GpuToCpuMap = {}

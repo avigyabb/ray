@@ -158,6 +158,16 @@ _common_options = {
     ),
     "enable_task_events": Option(bool, default_value=True),
     "_labels": Option((dict, type(None))),
+    # NUMA-affinity scheduling mode for GPU workloads. "soft" prefers GPUs that
+    # share a NUMA node / CPU socket but falls back to any available GPUs;
+    # "strict" only schedules when a co-located GPU set is available (otherwise
+    # the task/actor stays pending). None (default) disables NUMA-aware selection.
+    "numa_affinity": Option(
+        (str, type(None)),
+        lambda x: None
+        if x in (None, "soft", "strict")
+        else "numa_affinity must be None, 'soft', or 'strict'",
+    ),
 }
 
 

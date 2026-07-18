@@ -206,5 +206,84 @@ def test_maybe_bind_calls_through_when_enabled():
         set_mock.assert_called_once_with(["0", "1"])
 
 
+# ---------------------------------------------------------------------------
+# Component 0 topology detection
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "cpu_list,expected",
+    [
+        ("0-3", {0, 1, 2, 3}),
+        ("0,2,4", {0, 2, 4}),
+        ("0-1,4-5", {0, 1, 4, 5}),
+        ("", set()),
+        ("  0-2 \n", {0, 1, 2}),
+    ],
+)
+def test_parse_cpu_list(cpu_list, expected):
+    assert na.parse_cpu_list(cpu_list) == expected
+
+
+def test_get_cpu_to_numa_node_reads_sysfs(tmp_path):
+    (tmp_path / "node0").mkdir()
+    (tmp_path / "node1").mkdir()
+    (tmp_path / "node0" / "cpulist").write_text("0-1\n")
+    (tmp_path / "node1" / "cpulist").write_text("2-3\n")
+    # Non-node dirs are ignored.
+    (tmp_path / "has_cpu").mkdir()
+    mapping = na.get_cpu_to_numa_node(sysfs_root=str(tmp_path))
+    assert mapping == {0: 0, 1: 0, 2: 1, 3: 1}
+
+
+def test_get_cpu_to_numa_node_missing_root_is_empty():
+    assert na.get_cpu_to_numa_node(sysfs_root="/nonexistent/path/xyz") == {}
+
+
+def _install_fake_pynvml(node_ids):
+    """Return a fake pynvml module mapping device index -> NUMA node id."""
+    fake = mock.MagicMock()
+    fake.nvmlInit.return_value = None
+    fake.nvmlDeviceGetCount.return_value = len(node_ids)
+    fake.nvmlDeviceGetHandleByIndex.side_effect = lambda i: i
+    fake.nvmlDeviceGetNumaNodeId.side_effect = lambda i: node_ids[i]
+    return fake
+
+
+def test_get_gpu_numa_nodes_via_nvml():
+    fake = _install_fake_pynvml([0, 0, 1, 1])
+    with mock.patch.dict(
+        "sys.modules", {"ray._private.thirdparty.pynvml": fake}
+    ):
+        assert na.get_gpu_numa_nodes_via_nvml() == {"0": 0, "1": 0, "2": 1, "3": 1}
+
+
+def test_get_gpu_numa_nodes_omits_unknown_negative():
+    fake = _install_fake_pynvml([0, -1, 1])
+    with mock.patch.dict(
+        "sys.modules", {"ray._private.thirdparty.pynvml": fake}
+    ):
+        # GPU 1 has an unknown (-1) node and is omitted.
+        assert na.get_gpu_numa_nodes_via_nvml() == {"0": 0, "2": 1}
+
+
+# ---------------------------------------------------------------------------
+# numa_affinity remote-option validation
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("value", [None, "soft", "strict"])
+def test_numa_affinity_option_accepts_valid(value):
+    from ray._common.ray_option_utils import _common_options
+
+    opt = _common_options["numa_affinity"]
+    assert opt.validate("numa_affinity", value) is None
+
+
+@pytest.mark.parametrize("value", ["STRICT", "hard", "1", ""])
+def test_numa_affinity_option_rejects_invalid(value):
+    from ray._common.ray_option_utils import _common_options
+
+    opt = _common_options["numa_affinity"]
+    with pytest.raises(ValueError):
+        opt.validate("numa_affinity", value)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
