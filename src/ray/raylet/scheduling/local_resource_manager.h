@@ -124,10 +124,9 @@ class LocalResourceManager : public syncer::ReporterInterface {
       std::shared_ptr<TaskResourceInstances> task_allocation,
       NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
 
-  bool AllocateLocalTaskResources(
-      const ResourceRequest &resource_request,
-      std::shared_ptr<TaskResourceInstances> task_allocation,
-      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
+  bool AllocateLocalTaskResources(const ResourceRequest &resource_request,
+                                  std::shared_ptr<TaskResourceInstances> task_allocation,
+                                  NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
 
   void ReleaseWorkerResources(std::shared_ptr<TaskResourceInstances> task_allocation);
 

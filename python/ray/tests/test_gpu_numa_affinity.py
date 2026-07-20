@@ -65,9 +65,7 @@ def test_compute_unknown_gpu_returns_none():
 
 def test_compute_intersects_allowed_cpus_never_widens():
     # Process is already restricted to CPUs {2,3}; result must stay within it.
-    assert (
-        na.compute_gpu_local_cpu_set(["0"], TOPO, allowed_cpus={2, 3, 100}) == {2, 3}
-    )
+    assert na.compute_gpu_local_cpu_set(["0"], TOPO, allowed_cpus={2, 3, 100}) == {2, 3}
 
 
 def test_compute_disjoint_allowed_returns_none():
@@ -250,17 +248,13 @@ def _install_fake_pynvml(node_ids):
 
 def test_get_gpu_numa_nodes_via_nvml():
     fake = _install_fake_pynvml([0, 0, 1, 1])
-    with mock.patch.dict(
-        "sys.modules", {"ray._private.thirdparty.pynvml": fake}
-    ):
+    with mock.patch.dict("sys.modules", {"ray._private.thirdparty.pynvml": fake}):
         assert na.get_gpu_numa_nodes_via_nvml() == {"0": 0, "1": 0, "2": 1, "3": 1}
 
 
 def test_get_gpu_numa_nodes_omits_unknown_negative():
     fake = _install_fake_pynvml([0, -1, 1])
-    with mock.patch.dict(
-        "sys.modules", {"ray._private.thirdparty.pynvml": fake}
-    ):
+    with mock.patch.dict("sys.modules", {"ray._private.thirdparty.pynvml": fake}):
         # GPU 1 has an unknown (-1) node and is omitted.
         assert na.get_gpu_numa_nodes_via_nvml() == {"0": 0, "2": 1}
 

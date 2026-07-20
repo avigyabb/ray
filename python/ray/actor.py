@@ -29,7 +29,6 @@ from ray._common import ray_option_utils
 from ray._common.ray_constants import DEFAULT_MAX_CONCURRENCY_ASYNC
 from ray._common.ray_option_utils import _warn_if_using_deprecated_placement_group
 from ray._private.async_compat import has_async_methods
-from ray._private.numa_affinity import NUMA_AFFINITY_LABEL_KEY
 from ray._private.auto_init_hook import wrap_auto_init
 from ray._private.client_mode_hook import (
     client_mode_convert_actor,
@@ -41,6 +40,7 @@ from ray._private.inspect_util import (
     is_function_or_method,
     is_static_method,
 )
+from ray._private.numa_affinity import NUMA_AFFINITY_LABEL_KEY
 from ray._private.utils import get_runtime_env_info, parse_runtime_env_for_task_or_actor
 from ray._raylet import (
     STREAMING_GENERATOR_RETURN,

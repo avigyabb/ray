@@ -415,8 +415,7 @@ const std::vector<int64_t> &NodeResourceInstanceSet::GetInstanceNumaNodes(
   return it->second;
 }
 
-std::optional<std::vector<FixedPoint>>
-NodeResourceInstanceSet::AllocateWithinIndices(
+std::optional<std::vector<FixedPoint>> NodeResourceInstanceSet::AllocateWithinIndices(
     const std::vector<FixedPoint> &available,
     const std::vector<size_t> &indices,
     FixedPoint demand) const {

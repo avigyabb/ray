@@ -62,8 +62,7 @@ LocalResourceManager::LocalResourceManager(
   // node label, enabling NUMA-aware GPU selection. Fails open (no-op) when the
   // label is absent or malformed.
   auto numa_label_it = node_resources.labels.find(kGpuNumaNodesLabelKey);
-  if (numa_label_it != node_resources.labels.end() &&
-      !numa_label_it->second.empty()) {
+  if (numa_label_it != node_resources.labels.end() && !numa_label_it->second.empty()) {
     std::vector<int64_t> gpu_numa_nodes;
     for (absl::string_view part : absl::StrSplit(numa_label_it->second, ',')) {
       int64_t numa_node = 0;

@@ -64,6 +64,7 @@ def build_gpu_numa_nodes_label(num_gpus: int) -> Optional[str]:
         nodes.append(str(node))
     return ",".join(nodes)
 
+
 # A GPU->local-CPU topology map: global GPU index (as a string, matching the
 # accelerator-id representation Ray uses) -> set of local logical CPU indices.
 GpuToCpuMap = Dict[str, Set[int]]
