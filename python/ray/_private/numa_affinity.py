@@ -31,6 +31,39 @@ logger = logging.getLogger(__name__)
 # Cluster-wide opt-in for CPU-affinity binding of GPU workers.
 RAY_GPU_NUMA_AFFINITY_ENV_VAR = "RAY_EXPERIMENTAL_GPU_NUMA_AFFINITY"
 
+# Reserved task-label key that carries the per-request NUMA-affinity scheduling
+# mode ("soft"/"strict") to the raylet. Must match kNumaAffinityLabelKey in
+# src/ray/common/task/task_util.h. The raylet consumes and strips it.
+NUMA_AFFINITY_LABEL_KEY = "_ray_numa_affinity"
+
+# Reserved node-label key carrying this node's per-GPU NUMA node ids as a
+# comma-separated list in GPU-index order (e.g. "0,0,1,1"). Must match
+# kGpuNumaNodesLabelKey in src/ray/raylet/scheduling/local_resource_manager.cc.
+NUMA_GPU_NODES_LABEL_KEY = "_ray_gpu_numa_nodes"
+
+
+def build_gpu_numa_nodes_label(num_gpus: int) -> Optional[str]:
+    """Build the per-GPU NUMA node list for GPU indices 0..num_gpus-1.
+
+    Returns a comma-separated string like "0,0,1,1", or ``None`` if there are no
+    GPUs or the topology is unknown/incomplete (in which case the raylet falls
+    back to legacy, topology-blind allocation).
+    """
+    try:
+        num_gpus = int(num_gpus)
+    except (TypeError, ValueError):
+        return None
+    if num_gpus <= 0:
+        return None
+    gpu_nodes = get_gpu_numa_nodes_via_nvml()
+    nodes: List[str] = []
+    for i in range(num_gpus):
+        node = gpu_nodes.get(str(i))
+        if node is None:
+            return None  # Incomplete topology -> fail open.
+        nodes.append(str(node))
+    return ",".join(nodes)
+
 # A GPU->local-CPU topology map: global GPU index (as a string, matching the
 # accelerator-id representation Ray uses) -> set of local logical CPU indices.
 GpuToCpuMap = Dict[str, Set[int]]

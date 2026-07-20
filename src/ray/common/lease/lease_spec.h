@@ -53,6 +53,9 @@ class LeaseSpecification : public MessageWrapper<rpc::LeaseSpec> {
   const LabelSelector &GetLabelSelector() const;
   const std::vector<FallbackOption> &GetFallbackStrategy() const;
   const rpc::SchedulingStrategy &GetSchedulingStrategy() const;
+  /// The NUMA-affinity mode string ("" / "soft" / "strict"). Map to
+  /// NumaAffinityMode via ParseNumaAffinityMode at the allocation site.
+  const std::string &GetNumaAffinity() const;
   bool IsNodeAffinitySchedulingStrategy() const;
   NodeID GetNodeAffinitySchedulingStrategyNodeId() const;
   bool GetNodeAffinitySchedulingStrategySoft() const;

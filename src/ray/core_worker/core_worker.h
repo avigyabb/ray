@@ -1612,7 +1612,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
       const std::unordered_map<std::string, std::string> &labels = {},
       const LabelSelector &label_selector = {},
       const std::vector<FallbackOption> &fallback_strategy = {},
-      int64_t num_objects_per_yield = 1);
+      int64_t num_objects_per_yield = 1,
+      const std::string &numa_affinity = "");
 
   void SetCurrentTaskId(const TaskID &task_id,
                         uint64_t attempt_number,

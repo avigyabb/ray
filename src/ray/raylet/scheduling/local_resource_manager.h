@@ -121,10 +121,13 @@ class LocalResourceManager : public syncer::ReporterInterface {
   /// False otherwise.
   bool AllocateLocalTaskResources(
       const absl::flat_hash_map<std::string, double> &task_resources,
-      std::shared_ptr<TaskResourceInstances> task_allocation);
+      std::shared_ptr<TaskResourceInstances> task_allocation,
+      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
 
-  bool AllocateLocalTaskResources(const ResourceRequest &resource_request,
-                                  std::shared_ptr<TaskResourceInstances> task_allocation);
+  bool AllocateLocalTaskResources(
+      const ResourceRequest &resource_request,
+      std::shared_ptr<TaskResourceInstances> task_allocation,
+      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
 
   void ReleaseWorkerResources(std::shared_ptr<TaskResourceInstances> task_allocation);
 
@@ -224,7 +227,8 @@ class LocalResourceManager : public syncer::ReporterInterface {
   /// allocated resources, i.e., task_allocation.
   bool AllocateTaskResourceInstances(
       const ResourceRequest &resource_request,
-      std::shared_ptr<TaskResourceInstances> task_allocation);
+      std::shared_ptr<TaskResourceInstances> task_allocation,
+      NumaAffinityMode numa_mode = NumaAffinityMode::kNone);
 
   /// Free resources which were allocated with a task. The freed resources are
   /// added back to the node's local available resources.

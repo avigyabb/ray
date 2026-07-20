@@ -1916,7 +1916,8 @@ void CoreWorker::BuildCommonTaskSpec(
     const std::unordered_map<std::string, std::string> &labels,
     const LabelSelector &label_selector,
     const std::vector<FallbackOption> &fallback_strategy,
-    int64_t num_objects_per_yield) {
+    int64_t num_objects_per_yield,
+    const std::string &numa_affinity) {
   // Build common task spec.
   auto override_runtime_env_info =
       OverrideTaskOrActorRuntimeEnvInfo(serialized_runtime_env_info);
@@ -1967,7 +1968,8 @@ void CoreWorker::BuildCommonTaskSpec(
       labels,
       label_selector,
       fallback_strategy,
-      num_objects_per_yield);
+      num_objects_per_yield,
+      numa_affinity);
   // Set task arguments.
   for (const auto &arg : args) {
     builder.AddArg(*arg);
@@ -2049,7 +2051,8 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                       task_options.labels,
                       task_options.label_selector,
                       task_options.fallback_strategy,
-                      task_options.num_objects_per_yield);
+                      task_options.num_objects_per_yield,
+                      task_options.numa_affinity);
   ActorID root_detached_actor_id;
   if (!worker_context_->GetRootDetachedActorID().IsNil()) {
     root_detached_actor_id = worker_context_->GetRootDetachedActorID();
@@ -2137,7 +2140,9 @@ Status CoreWorker::CreateActor(const RayFunction &function,
                       /*enable_task_events=*/actor_creation_options.enable_task_events,
                       actor_creation_options.labels,
                       actor_creation_options.label_selector,
-                      actor_creation_options.fallback_strategy);
+                      actor_creation_options.fallback_strategy,
+                      /*num_objects_per_yield=*/1,
+                      actor_creation_options.numa_affinity);
 
   // If the namespace is not specified, get it from the job.
   const auto ray_namespace = (actor_creation_options.ray_namespace.empty()
@@ -2492,7 +2497,8 @@ Status CoreWorker::SubmitActorTask(
                       /*labels=*/task_options.labels,
                       /*label_selector=*/{},
                       /*fallback_strategy=*/{},
-                      task_options.num_objects_per_yield);
+                      task_options.num_objects_per_yield,
+                      task_options.numa_affinity);
   // NOTE: placement_group_capture_child_tasks and runtime_env will
   // be ignored in the actor because we should always follow the actor's option.
 

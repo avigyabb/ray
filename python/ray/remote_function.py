@@ -12,6 +12,7 @@ from ray._common import ray_option_utils
 from ray._common.ray_option_utils import _warn_if_using_deprecated_placement_group
 from ray._common.serialization import pickle_dumps
 from ray._private.auto_init_hook import wrap_auto_init
+from ray._private.numa_affinity import NUMA_AFFINITY_LABEL_KEY
 from ray._private.client_mode_hook import (
     client_mode_convert_function,
     client_mode_should_convert,
@@ -512,6 +513,14 @@ class RemoteFunction:
         labels = task_options.get("_labels")
         label_selector = task_options.get("label_selector")
         fallback_strategy = task_options.get("fallback_strategy")
+
+        # Carry the NUMA-affinity mode to the scheduler via a reserved task
+        # label. The raylet consumes and strips it (see kNumaAffinityLabelKey
+        # in task_util.h) so it never surfaces as a user-visible label.
+        numa_affinity = task_options.get("numa_affinity")
+        if numa_affinity:
+            labels = dict(labels or {})
+            labels[NUMA_AFFINITY_LABEL_KEY] = numa_affinity
 
         def invocation(args, kwargs):
             if self._is_cross_language:

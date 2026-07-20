@@ -22,9 +22,19 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_split.h"
 #include "ray/common/scheduling/placement_group_util.h"
 #include "ray/common/scheduling/resource_set.h"
 #include "ray/util/logging.h"
+
+namespace {
+/// Reserved node-label key carrying the per-GPU NUMA node ids as a
+/// comma-separated list in GPU-index order (e.g. "0,0,1,1"). Produced by the
+/// Python node bootstrap; must match NUMA_GPU_NODES_LABEL_KEY in
+/// python/ray/_private/numa_affinity.py.
+constexpr char kGpuNumaNodesLabelKey[] = "_ray_gpu_numa_nodes";
+}  // namespace
 
 namespace ray {
 
@@ -48,6 +58,23 @@ LocalResourceManager::LocalResourceManager(
   local_resources_.available = NodeResourceInstanceSet(node_resources.total);
   local_resources_.total = NodeResourceInstanceSet(node_resources.total);
   local_resources_.labels = node_resources.labels;
+  // Populate per-GPU-instance NUMA topology (Component 0) from the reserved
+  // node label, enabling NUMA-aware GPU selection. Fails open (no-op) when the
+  // label is absent or malformed.
+  auto numa_label_it = node_resources.labels.find(kGpuNumaNodesLabelKey);
+  if (numa_label_it != node_resources.labels.end() &&
+      !numa_label_it->second.empty()) {
+    std::vector<int64_t> gpu_numa_nodes;
+    for (absl::string_view part : absl::StrSplit(numa_label_it->second, ',')) {
+      int64_t numa_node = 0;
+      if (absl::SimpleAtoi(part, &numa_node)) {
+        gpu_numa_nodes.push_back(numa_node);
+      }
+    }
+    const auto gpu_id = scheduling::ResourceID::GPU();
+    local_resources_.available.SetInstanceNumaNodes(gpu_id, gpu_numa_nodes);
+    local_resources_.total.SetInstanceNumaNodes(gpu_id, gpu_numa_nodes);
+  }
   const auto now = clock_.Now();
   for (const auto &resource_id : node_resources.total.ExplicitResourceIds()) {
     idle_time_states_[resource_id] = IdleTimeState{now, absl::nullopt};
@@ -89,10 +116,11 @@ uint64_t LocalResourceManager::GetNumCpus() const {
 
 bool LocalResourceManager::AllocateTaskResourceInstances(
     const ResourceRequest &resource_request,
-    std::shared_ptr<TaskResourceInstances> task_allocation) {
+    std::shared_ptr<TaskResourceInstances> task_allocation,
+    NumaAffinityMode numa_mode) {
   RAY_CHECK(task_allocation != nullptr);
-  auto allocation =
-      local_resources_.available.TryAllocate(resource_request.GetResourceSet());
+  auto allocation = local_resources_.available.TryAllocate(
+      resource_request.GetResourceSet(), numa_mode);
   if (allocation) {
     *task_allocation = TaskResourceInstances(*allocation);
     for (const auto &resource_id : resource_request.ResourceIds()) {
@@ -281,8 +309,9 @@ std::optional<absl::Time> LocalResourceManager::GetResourceIdleTime() const {
 
 bool LocalResourceManager::AllocateLocalTaskResources(
     const ResourceRequest &resource_request,
-    std::shared_ptr<TaskResourceInstances> task_allocation) {
-  if (AllocateTaskResourceInstances(resource_request, task_allocation)) {
+    std::shared_ptr<TaskResourceInstances> task_allocation,
+    NumaAffinityMode numa_mode) {
+  if (AllocateTaskResourceInstances(resource_request, task_allocation, numa_mode)) {
     OnResourceOrStateChanged();
     return true;
   }
@@ -291,12 +320,13 @@ bool LocalResourceManager::AllocateLocalTaskResources(
 
 bool LocalResourceManager::AllocateLocalTaskResources(
     const absl::flat_hash_map<std::string, double> &task_resources,
-    std::shared_ptr<TaskResourceInstances> task_allocation) {
+    std::shared_ptr<TaskResourceInstances> task_allocation,
+    NumaAffinityMode numa_mode) {
   RAY_CHECK(task_allocation != nullptr);
   // We don't track object store memory demands so no need to allocate them.
   ResourceRequest resource_request = ResourceMapToResourceRequest(
       task_resources, /*requires_object_store_memory=*/false);
-  return AllocateLocalTaskResources(resource_request, task_allocation);
+  return AllocateLocalTaskResources(resource_request, task_allocation, numa_mode);
 }
 
 void LocalResourceManager::ReleaseWorkerResources(

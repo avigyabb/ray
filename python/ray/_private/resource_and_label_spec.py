@@ -160,12 +160,41 @@ class ResourceAndLabelSpec:
         # Resolve and merge node labels from all sources (params, env, and default).
         self._resolve_labels(accelerator_manager)
 
+        # Attach this node's per-GPU NUMA topology as a reserved node label so
+        # the raylet can perform NUMA-aware GPU selection (Component 0).
+        self._resolve_gpu_numa_topology_label(accelerator_manager)
+
         # Resolve memory resources
         self._resolve_memory_resources(resource_isolation_config)
 
         self._is_resolved = True
         assert self._all_fields_set()
         return self
+
+    def _resolve_gpu_numa_topology_label(self, accelerator_manager) -> None:
+        """Detect this node's GPU->NUMA topology and store it as a reserved node
+        label. No-op unless there are NVIDIA GPUs with a fully-known topology."""
+        if not self.num_gpus:
+            return
+        if (
+            accelerator_manager is None
+            or accelerator_manager.get_resource_name() != "GPU"
+        ):
+            return
+        try:
+            from ray._private.numa_affinity import (
+                NUMA_GPU_NODES_LABEL_KEY,
+                build_gpu_numa_nodes_label,
+            )
+
+            label = build_gpu_numa_nodes_label(self.num_gpus)
+        except Exception:
+            logger.debug("Failed to detect GPU NUMA topology", exc_info=True)
+            label = None
+        if label:
+            if self.labels is None:
+                self.labels = {}
+            self.labels[NUMA_GPU_NODES_LABEL_KEY] = label
 
     @staticmethod
     def _load_env_resources() -> Dict[str, float]:

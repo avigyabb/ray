@@ -31,6 +31,11 @@
 
 namespace ray {
 
+/// Reserved task-label key used to carry the NUMA-affinity scheduling mode
+/// ("soft"/"strict") from the Python layer into the task spec. It is consumed
+/// and stripped in SetCommonTaskSpec, so it never reaches user-visible labels.
+inline constexpr char kNumaAffinityLabelKey[] = "_ray_numa_affinity";
+
 /// Stores the task failure reason.
 struct TaskFailureEntry {
   /// The task failure details.
@@ -161,7 +166,8 @@ class TaskSpecBuilder {
       const LabelSelector &label_selector = {},
       const std::vector<FallbackOption> &fallback_strategy =
           std::vector<FallbackOption>(),
-      uint64_t num_objects_per_yield = 1) {
+      uint64_t num_objects_per_yield = 1,
+      const std::string &numa_affinity = "") {
     message_->set_type(TaskType::NORMAL_TASK);
     message_->set_name(name);
     message_->set_language(language);
@@ -196,6 +202,19 @@ class TaskSpecBuilder {
     message_->mutable_labels()->insert(labels.begin(), labels.end());
     label_selector.ToProto(message_->mutable_label_selector());
     *message_->mutable_fallback_strategy() = SerializeFallbackStrategy(fallback_strategy);
+    // NUMA-affinity mode may be supplied directly (numa_affinity) or carried as
+    // a reserved task label from the Python layer. Prefer the explicit param;
+    // otherwise read the reserved label, then strip it so it does not pollute
+    // the user-visible label set / label-based scheduling.
+    std::string effective_numa_affinity = numa_affinity;
+    if (effective_numa_affinity.empty()) {
+      auto it = message_->labels().find(kNumaAffinityLabelKey);
+      if (it != message_->labels().end()) {
+        effective_numa_affinity = it->second;
+      }
+    }
+    message_->mutable_labels()->erase(kNumaAffinityLabelKey);
+    message_->set_numa_affinity(effective_numa_affinity);
     return *this;
   }
 

@@ -360,7 +360,8 @@ void LocalLeaseManager::GrantScheduledLeasesToWorkers() {
           !cluster_resource_scheduler_.GetLocalResourceManager().IsLocalNodeDraining() &&
           cluster_resource_scheduler_.GetLocalResourceManager()
               .AllocateLocalTaskResources(spec.GetRequiredResources().GetResourceMap(),
-                                          allocated_instances);
+                                          allocated_instances,
+                                          ParseNumaAffinityMode(spec.GetNumaAffinity()));
       if (!schedulable) {
         ReleaseLeaseArgs(lease_id);
         // The local node currently does not have the resources to grant the lease, so we

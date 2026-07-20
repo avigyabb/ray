@@ -29,6 +29,7 @@ from ray._common import ray_option_utils
 from ray._common.ray_constants import DEFAULT_MAX_CONCURRENCY_ASYNC
 from ray._common.ray_option_utils import _warn_if_using_deprecated_placement_group
 from ray._private.async_compat import has_async_methods
+from ray._private.numa_affinity import NUMA_AFFINITY_LABEL_KEY
 from ray._private.auto_init_hook import wrap_auto_init
 from ray._private.client_mode_hook import (
     client_mode_convert_actor,
@@ -2182,6 +2183,14 @@ class ActorClass(Generic[T]):
         if actor_generator_backpressure_num_objects is None:
             actor_generator_backpressure_num_objects = -1
 
+        # Carry the NUMA-affinity mode to the scheduler via a reserved label
+        # (consumed and stripped by the raylet; see kNumaAffinityLabelKey).
+        actor_labels = actor_options.get("_labels")
+        numa_affinity = actor_options.get("numa_affinity")
+        if numa_affinity:
+            actor_labels = dict(actor_labels or {})
+            actor_labels[NUMA_AFFINITY_LABEL_KEY] = numa_affinity
+
         actor_id = worker.core_worker.create_actor(
             meta.language,
             meta.actor_creation_function_descriptor,
@@ -2202,7 +2211,7 @@ class ActorClass(Generic[T]):
             max_pending_calls=max_pending_calls,
             scheduling_strategy=scheduling_strategy,
             enable_task_events=enable_task_events,
-            labels=actor_options.get("_labels"),
+            labels=actor_labels,
             label_selector=actor_options.get("label_selector"),
             fallback_strategy=actor_options.get("fallback_strategy"),
             allow_out_of_order_execution=allow_out_of_order_execution,

@@ -35,6 +35,7 @@ LeaseSpecification::LeaseSpecification(const rpc::TaskSpec &task_spec)
   message_->mutable_scheduling_strategy()->CopyFrom(task_spec.scheduling_strategy());
   message_->mutable_label_selector()->CopyFrom(task_spec.label_selector());
   message_->mutable_fallback_strategy()->CopyFrom(task_spec.fallback_strategy());
+  message_->set_numa_affinity(task_spec.numa_affinity());
   message_->set_depth(task_spec.depth());
   message_->set_parent_task_id(task_spec.parent_task_id());
   message_->mutable_dependencies()->Reserve(task_spec.args_size());
@@ -259,6 +260,10 @@ int64_t LeaseSpecification::GetDepth() const { return message_->depth(); }
 
 const rpc::SchedulingStrategy &LeaseSpecification::GetSchedulingStrategy() const {
   return message_->scheduling_strategy();
+}
+
+const std::string &LeaseSpecification::GetNumaAffinity() const {
+  return message_->numa_affinity();
 }
 
 const ResourceSet &LeaseSpecification::GetRequiredResources() const {

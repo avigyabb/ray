@@ -499,6 +499,9 @@ message LeaseSpec {
   uint64 attempt_number = 21;
   string task_name = 22;
   FallbackStrategy fallback_strategy = 23;
+  // NUMA-affinity scheduling mode: "" (disabled), "soft", or "strict".
+  // Copied from the originating TaskSpec; consumed during local allocation.
+  string numa_affinity = 24;
 }
 
 /// The task specification encapsulates all immutable information about the
@@ -625,6 +628,10 @@ message TaskSpec {
   // Private streaming generator option. The number of ObjectRefs produced by
   // each generator yield. Defaults to 1.
   uint64 num_objects_per_yield = 46;
+  // NUMA-affinity scheduling mode for GPU workloads: "" (disabled), "soft"
+  // (prefer GPUs co-located on one NUMA node, fall back to any), or "strict"
+  // (only schedule on a co-located GPU set, otherwise stay pending).
+  optional string numa_affinity = 47;
 }
 
 message TaskInfoEntry {

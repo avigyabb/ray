@@ -34,6 +34,17 @@ namespace ray {
 ///             otherwise fail (the lease stays pending until it can be met).
 enum class NumaAffinityMode { kNone = 0, kSoft = 1, kStrict = 2 };
 
+/// Parse a NUMA-affinity mode string ("soft"/"strict"; anything else -> kNone).
+inline NumaAffinityMode ParseNumaAffinityMode(const std::string &mode) {
+  if (mode == "strict") {
+    return NumaAffinityMode::kStrict;
+  }
+  if (mode == "soft") {
+    return NumaAffinityMode::kSoft;
+  }
+  return NumaAffinityMode::kNone;
+}
+
 /// Represents a node resource set that contains the per-instance resource values.
 class NodeResourceInstanceSet {
  public:

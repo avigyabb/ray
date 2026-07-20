@@ -76,7 +76,8 @@ struct TaskOptions {
               std::unordered_map<std::string, std::string> labels_p = {},
               LabelSelector label_selector_p = {},
               std::optional<std::string> tensor_transport_p = std::nullopt,
-              std::vector<FallbackOption> fallback_strategy_p = {})
+              std::vector<FallbackOption> fallback_strategy_p = {},
+              std::string numa_affinity_p = "")
       : name(std::move(name_p)),
         num_returns(num_returns_p),
         resources(resources_p),
@@ -88,7 +89,8 @@ struct TaskOptions {
         labels(std::move(labels_p)),
         label_selector(std::move(label_selector_p)),
         fallback_strategy(std::move(fallback_strategy_p)),
-        tensor_transport(std::move(tensor_transport_p)) {}
+        tensor_transport(std::move(tensor_transport_p)),
+        numa_affinity(std::move(numa_affinity_p)) {}
 
   /// The name of this task.
   std::string name;
@@ -119,6 +121,8 @@ struct TaskOptions {
   std::vector<FallbackOption> fallback_strategy;
   // The tensor transport (e.g., NCCL, GLOO, etc.) to use for this task.
   std::optional<std::string> tensor_transport;
+  // NUMA-affinity scheduling mode: "" (disabled), "soft", or "strict".
+  std::string numa_affinity;
 };
 
 /// Options for actor creation tasks.
@@ -144,7 +148,8 @@ struct ActorCreationOptions {
                        std::unordered_map<std::string, std::string> labels_p = {},
                        LabelSelector label_selector_p = {},
                        std::vector<FallbackOption> fallback_strategy_p = {},
-                       int64_t actor_generator_backpressure_num_objects_p = -1)
+                       int64_t actor_generator_backpressure_num_objects_p = -1,
+                       std::string numa_affinity_p = "")
       : max_restarts(max_restarts_p),
         max_task_retries(max_task_retries_p),
         max_concurrency(max_concurrency_p),
@@ -167,7 +172,8 @@ struct ActorCreationOptions {
         label_selector(std::move(label_selector_p)),
         fallback_strategy(std::move(fallback_strategy_p)),
         actor_generator_backpressure_num_objects(
-            actor_generator_backpressure_num_objects_p) {
+            actor_generator_backpressure_num_objects_p),
+        numa_affinity(std::move(numa_affinity_p)) {
     // Check that resources is a subset of placement resources.
     for (auto &resource : resources) {
       auto it = this->placement_resources.find(resource.first);
@@ -232,6 +238,8 @@ struct ActorCreationOptions {
   // on this actor. -1 disables the cap. See proto field
   // ActorCreationTaskSpec.actor_generator_backpressure_num_objects.
   const int64_t actor_generator_backpressure_num_objects = -1;
+  // NUMA-affinity scheduling mode: "" (disabled), "soft", or "strict".
+  std::string numa_affinity;
 };
 
 using PlacementStrategy = rpc::PlacementStrategy;
