@@ -28,6 +28,17 @@ ray_cc_test(
 )
 
 ray_cc_test(
+    name = "worker_numa_binding_test",
+    size = "small",
+    srcs = ["worker_numa_binding_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        "//src/ray/raylet:worker_numa_binding",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+ray_cc_test(
     name = "worker_pool_test",
     size = "small",
     srcs = ["worker_pool_test.cc"],

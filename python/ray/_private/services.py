@@ -20,6 +20,7 @@ from typing import IO, AnyStr, List, Optional
 
 # Ray modules
 import ray
+import ray._private.gpu_numa_topology
 import ray._private.ray_constants as ray_constants
 from ray._common.network_utils import (
     build_address,
@@ -1989,6 +1990,17 @@ def start_raylet(
         f"--labels={labels_json_str}",
         f"--cluster-id={cluster_id}",
     ]
+
+    # When GPU NUMA affinity is opted in (RAY_EXPERIMENTAL_GPU_NUMA_AFFINITY=1)
+    # and this node's per-GPU NUMA topology is detectable, pass it to the
+    # raylet so GPU actor workers can be NUMA-bound at spawn.
+    gpu_numa_topology_spec = (
+        ray._private.gpu_numa_topology.get_gpu_numa_topology_spec_if_enabled(
+            resource_and_label_spec.num_gpus
+        )
+    )
+    if gpu_numa_topology_spec:
+        command.append(f"--gpu_numa_topology={gpu_numa_topology_spec}")
 
     if resource_isolation_config.is_enabled():
         logging.info(

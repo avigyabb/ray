@@ -103,6 +103,17 @@ ray_cc_library(
 )
 
 ray_cc_library(
+    name = "worker_numa_binding",
+    srcs = ["worker_numa_binding.cc"],
+    hdrs = ["worker_numa_binding.h"],
+    visibility = [":__subpackages__"],
+    deps = [
+        "//src/ray/common/scheduling:cluster_resource_data",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+ray_cc_library(
     name = "worker_pool",
     srcs = ["worker_pool.cc"],
     hdrs = ["worker_pool.h"],
@@ -111,6 +122,7 @@ ray_cc_library(
         ":metrics",
         ":runtime_env_agent_client",
         ":worker_interface",
+        ":worker_numa_binding",
         "//src/ray/asio:periodical_runner_interface",
         "//src/ray/common:constants",
         "//src/ray/common:lease",

@@ -132,6 +132,12 @@ DEFINE_bool(huge_pages, false, "Enable huge pages.");
 DEFINE_string(labels,
               "",
               "Define the key-value format of node labels, which is a serialized JSON.");
+DEFINE_string(gpu_numa_topology,
+              "",
+              "Per-GPU NUMA topology of this node: one ';'-separated entry per GPU "
+              "instance index, each '<numa_node>:<cpulist>' (e.g. '0:0-15;1:16-31'). "
+              "When set, workers started for GPU actor leases whose GPUs share a NUMA "
+              "node are CPU/memory bound to that node at spawn. Empty disables binding.");
 DEFINE_bool(
     enable_resource_isolation,
     false,
@@ -733,7 +739,8 @@ int main(int argc, char *argv[]) {
         node_manager_config.ray_debugger_external,
         /*clock=*/clock,
         worker_pool_metrics,
-        std::move(add_process_to_workers_cgroup_hook));
+        std::move(add_process_to_workers_cgroup_hook),
+        FLAGS_gpu_numa_topology);
 
     client_call_manager = std::make_unique<ray::rpc::ClientCallManager>(
         main_service, /*record_stats=*/true, node_ip_address);

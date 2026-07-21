@@ -101,7 +101,8 @@ WorkerPool::WorkerPool(instrumented_io_context &io_service,
                        int ray_debugger_external,
                        ClockInterface &clock,
                        WorkerPoolMetrics &worker_pool_metrics,
-                       AddProcessToCgroupHook add_to_cgroup_hook)
+                       AddProcessToCgroupHook add_to_cgroup_hook,
+                       const std::string &gpu_numa_topology_spec)
     : clock_(clock),
       io_service_(&io_service),
       node_id_(node_id),
@@ -124,8 +125,14 @@ WorkerPool::WorkerPool(instrumented_io_context &io_service,
       num_prestart_python_workers(num_prestarted_python_workers),
       periodical_runner_(std::move(periodical_runner)),
       add_to_cgroup_hook_(std::move(add_to_cgroup_hook)),
+      gpu_numa_topology_(ParseGpuNumaTopology(gpu_numa_topology_spec)),
       worker_pool_metrics_(worker_pool_metrics) {
   RAY_CHECK_GT(maximum_startup_concurrency_, 0);
+  if (!gpu_numa_topology_.empty()) {
+    RAY_LOG(INFO) << "GPU NUMA topology configured for " << gpu_numa_topology_.size()
+                  << " GPUs; workers for co-located GPU actor leases will be "
+                     "NUMA-bound at spawn.";
+  }
   // We need to record so that the metric exists. This way, we report that 0
   // processes have started before a task runs on the node (as opposed to the
   // metric not existing at all).
@@ -468,7 +475,8 @@ std::tuple<const ProcessInterface &, WorkerID> WorkerPool::StartWorkerProcess(
     const int runtime_env_hash,
     const std::string &serialized_runtime_env_context,
     const rpc::RuntimeEnvInfo &runtime_env_info,
-    std::optional<absl::Duration> worker_startup_keep_alive_duration) {
+    std::optional<absl::Duration> worker_startup_keep_alive_duration,
+    const std::shared_ptr<TaskResourceInstances> &allocated_instances) {
   rpc::JobConfig *job_config = nullptr;
   if (!job_id.IsNil()) {
     auto it = all_jobs_.find(job_id);
@@ -523,10 +531,24 @@ std::tuple<const ProcessInterface &, WorkerID> WorkerPool::StartWorkerProcess(
                               serialized_runtime_env_context,
                               state);
 
+  // If the node's GPU NUMA topology is known and this worker's GPUs are
+  // co-located on one NUMA node, pin the worker's CPUs and preferred memory
+  // node at spawn so that all of its memory (interpreter, imports, user code)
+  // is faulted onto the GPU-local node. Fails open to an unbound worker.
+  std::optional<NumaBindSpec> numa_bind_spec;
+  if (allocated_instances != nullptr && !gpu_numa_topology_.empty()) {
+    numa_bind_spec = ComputeNumaBindSpec(gpu_numa_topology_, *allocated_instances);
+    if (numa_bind_spec.has_value()) {
+      RAY_LOG(INFO).WithField(worker_id)
+          << "NUMA-binding worker at spawn: numa_node=" << numa_bind_spec->numa_node
+          << ", num_cpus=" << numa_bind_spec->cpus.size();
+    }
+  }
+
   SteadyTimePoint start = clock_.SteadyNow();
   // Start a process and measure the startup time.
   std::unique_ptr<ProcessInterface> proc =
-      StartProcess(worker_command_args, env, worker_id);
+      StartProcess(worker_command_args, env, worker_id, numa_bind_spec);
   worker_pool_metrics_.num_workers_started_sum.Record(1);
   RAY_LOG(INFO).WithField(worker_id)
       << "Started worker process with pid " << proc->GetId();
@@ -677,7 +699,8 @@ void WorkerPool::MonitorPopWorkerRequestForRegistration(
 std::unique_ptr<ProcessInterface> WorkerPool::StartProcess(
     const std::vector<std::string> &worker_command_args,
     const ProcessEnvironment &env,
-    const WorkerID &worker_id) {
+    const WorkerID &worker_id,
+    const std::optional<NumaBindSpec> &numa_bind_spec) {
   // Launch the process to create the worker.
   std::error_code ec;
   std::vector<const char *> argv;
@@ -713,13 +736,26 @@ std::unique_ptr<ProcessInterface> WorkerPool::StartProcess(
   // Workers should be placed into their own process groups (if enabled) to enable
   // per-worker cleanup via killpg on worker death.
   const bool new_process_group = RayConfig::instance().process_group_cleanup_enabled();
+  // The cgroup hook runs in the forked child after fork and before exec, which
+  // is exactly where NUMA binding must happen: sched_setaffinity and
+  // set_mempolicy both survive execve, so the worker is born bound and every
+  // page it faults (interpreter, imports, user code) lands on the GPU-local
+  // NUMA node via first-touch.
+  AddProcessToCgroupHook child_pre_exec_hook = add_to_cgroup_hook_;
+  if (numa_bind_spec.has_value()) {
+    child_pre_exec_hook = [bind_spec = *numa_bind_spec,
+                           base_hook = add_to_cgroup_hook_](const std::string &pid) {
+      ApplyNumaBindingInChild(bind_spec);
+      base_hook(pid);
+    };
+  }
   std::unique_ptr<ProcessInterface> child =
       std::make_unique<Process>(argv.data(),
                                 ec,
                                 /*decouple=*/false,
                                 env,
                                 /*pipe_to_stdin=*/false,
-                                add_to_cgroup_hook_,
+                                std::move(child_pre_exec_hook),
                                 new_process_group);
   if (!child->IsValid() || ec) {
     // errorcode 24: Too many files. This is caused by ulimit.
@@ -1380,6 +1416,10 @@ void WorkerPool::StartNewWorker(
         request->runtime_env_info_.serialized_runtime_env();
 
     PopWorkerStatus status = PopWorkerStatus::OK;
+    // Only actor-creation workers are NUMA-bound at spawn: they live and die
+    // with their actor, so a binding baked at fork can never be handed to a
+    // lease with a different GPU assignment via worker reuse.
+    const bool numa_bind_eligible = request->is_actor_worker_.value_or(false);
     auto [proc, worker_id] =
         StartWorkerProcess(request->language_,
                            request->worker_type_,
@@ -1389,7 +1429,8 @@ void WorkerPool::StartNewWorker(
                            request->runtime_env_hash_,
                            serialized_runtime_env_context,
                            request->runtime_env_info_,
-                           request->worker_startup_keep_alive_duration_);
+                           request->worker_startup_keep_alive_duration_,
+                           numa_bind_eligible ? request->allocated_instances_ : nullptr);
     if (status == PopWorkerStatus::OK) {
       RAY_CHECK(proc.IsValid());
       WarnAboutSize();
@@ -1434,8 +1475,10 @@ void WorkerPool::StartNewWorker(
   }
 }
 
-void WorkerPool::PopWorker(const LeaseSpecification &lease_spec,
-                           const PopWorkerCallback &callback) {
+void WorkerPool::PopWorker(
+    const LeaseSpecification &lease_spec,
+    const std::shared_ptr<TaskResourceInstances> &allocated_instances,
+    const PopWorkerCallback &callback) {
   auto pop_worker_request = std::make_shared<PopWorkerRequest>(
       lease_spec.GetLanguage(),
       rpc::WorkerType::WORKER,
@@ -1469,7 +1512,8 @@ void WorkerPool::PopWorker(const LeaseSpecification &lease_spec,
           return false;
         }
         return callback(worker, status, runtime_env_setup_error_message);
-      });
+      },
+      allocated_instances);
   PopWorker(std::move(pop_worker_request));
 }
 

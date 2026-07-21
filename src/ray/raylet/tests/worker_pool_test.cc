@@ -192,7 +192,8 @@ class WorkerPoolMock : public WorkerPool {
   std::unique_ptr<ProcessInterface> StartProcess(
       const std::vector<std::string> &worker_command_args,
       const ProcessEnvironment &env,
-      const WorkerID &worker_id) override {
+      const WorkerID &worker_id,
+      const std::optional<NumaBindSpec> &numa_bind_spec = std::nullopt) override {
     // Use a bogus process ID that won't conflict with those in the system
     pid_t pid =
         static_cast<pid_t>(Process::PID_MAX_LIMIT + 1 + worker_commands_by_proc_.size());

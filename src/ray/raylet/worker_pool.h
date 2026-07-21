@@ -41,6 +41,7 @@
 #include "ray/raylet/metrics.h"
 #include "ray/raylet/runtime_env_agent_client.h"
 #include "ray/raylet/worker_interface.h"
+#include "ray/raylet/worker_numa_binding.h"
 #include "ray/raylet_ipc_client/client_connection.h"
 #include "ray/stats/metric.h"
 #include "ray/util/clock.h"
@@ -103,6 +104,7 @@ struct PopWorkerRequest {
   const int runtime_env_hash_;
   const std::vector<std::string> dynamic_options_;
   std::optional<absl::Duration> worker_startup_keep_alive_duration_;
+  const std::shared_ptr<TaskResourceInstances> allocated_instances_;
 
   PopWorkerCallback callback_;
 
@@ -116,7 +118,8 @@ struct PopWorkerRequest {
                    int runtime_env_hash,
                    std::vector<std::string> options,
                    std::optional<absl::Duration> worker_startup_keep_alive_duration,
-                   PopWorkerCallback callback)
+                   PopWorkerCallback callback,
+                   std::shared_ptr<TaskResourceInstances> allocated_instances = nullptr)
       : language_(lang),
         worker_type_(worker_type),
         job_id_(job),
@@ -127,6 +130,7 @@ struct PopWorkerRequest {
         runtime_env_hash_(runtime_env_hash),
         dynamic_options_(std::move(options)),
         worker_startup_keep_alive_duration_(worker_startup_keep_alive_duration),
+        allocated_instances_(std::move(allocated_instances)),
         callback_(std::move(callback)) {}
 };
 
@@ -176,7 +180,17 @@ class WorkerPoolInterface : public IOWorkerPoolInterface {
   /// Case 2: An suitable worker registered to raylet.
   /// The corresponding PopWorkerStatus will be passed to the callback.
   virtual void PopWorker(const LeaseSpecification &lease_spec,
-                         const PopWorkerCallback &callback) = 0;
+                         const PopWorkerCallback &callback) {
+    PopWorker(lease_spec, nullptr, callback);
+  }
+
+  /// Same as above, additionally carrying the resource instances the raylet
+  /// allocated for the lease (e.g. the specific GPU slots), so the spawned
+  /// worker process can be NUMA-bound to its GPUs at startup.
+  virtual void PopWorker(
+      const LeaseSpecification &lease_spec,
+      const std::shared_ptr<TaskResourceInstances> &allocated_instances,
+      const PopWorkerCallback &callback) = 0;
   /// Add an idle worker to the pool.
   ///
   /// \param The idle worker to add.
@@ -314,6 +328,10 @@ class WorkerPool : public WorkerPoolInterface {
   /// \param add_to_cgroup_hook A lifecycle hook that the forked worker process will
   /// execute becoming a worker process. The hook adds a newly forked process into
   /// the appropriate cgroup.
+  /// \param gpu_numa_topology_spec Per-GPU NUMA topology of this node (see
+  /// ParseGpuNumaTopology for the format). When non-empty, workers started for
+  /// actor-creation leases with GPUs co-located on one NUMA node are CPU/memory
+  /// bound to that node at spawn. Empty (the default) disables binding.
   WorkerPool(
       instrumented_io_context &io_service,
       std::shared_ptr<PeriodicalRunnerInterface> periodical_runner,
@@ -332,7 +350,8 @@ class WorkerPool : public WorkerPoolInterface {
       int ray_debugger_external,
       ClockInterface &clock,
       WorkerPoolMetrics &worker_pool_metrics,
-      AddProcessToCgroupHook add_to_cgroup_hook = [](const std::string &) {});
+      AddProcessToCgroupHook add_to_cgroup_hook = [](const std::string &) {},
+      const std::string &gpu_numa_topology_spec = "");
 
   /// Destructor responsible for freeing a set of workers owned by this class.
   ~WorkerPool() override;
@@ -483,8 +502,11 @@ class WorkerPool : public WorkerPoolInterface {
   /// See interface.
   void PushWorker(const std::shared_ptr<WorkerInterface> &worker) override;
 
+  using WorkerPoolInterface::PopWorker;
+
   /// See interface.
   void PopWorker(const LeaseSpecification &lease_spec,
+                 const std::shared_ptr<TaskResourceInstances> &allocated_instances,
                  const PopWorkerCallback &callback) override;
 
   /// Try to prestart a number of workers suitable the given lease spec. Prestarting
@@ -585,6 +607,9 @@ class WorkerPool : public WorkerPoolInterface {
   /// \param worker_startup_keep_alive_duration If set, the worker will be kept alive for
   ///   this duration even if it's idle. This is only applicable before a lease is
   ///   assigned to the worker.
+  /// \param allocated_instances If set, the resource instances the raylet allocated to
+  ///   the lease this worker is being started for. Used to NUMA-bind the worker to its
+  ///   GPUs at spawn when the node's GPU NUMA topology is known.
   /// \return The process that we started and the worker ID assigned to it. If the worker
   /// ID is nil, we didn't start a process.
   std::tuple<const ProcessInterface &, WorkerID> StartWorkerProcess(
@@ -596,7 +621,8 @@ class WorkerPool : public WorkerPoolInterface {
       int runtime_env_hash = 0,
       const std::string &serialized_runtime_env_context = "{}",
       const rpc::RuntimeEnvInfo &runtime_env_info = rpc::RuntimeEnvInfo(),
-      std::optional<absl::Duration> worker_startup_keep_alive_duration = std::nullopt);
+      std::optional<absl::Duration> worker_startup_keep_alive_duration = std::nullopt,
+      const std::shared_ptr<TaskResourceInstances> &allocated_instances = nullptr);
 
   /// The implementation of how to start a new worker process with command arguments.
   /// The lifetime of the process is tied to that of the returned object,
@@ -606,11 +632,14 @@ class WorkerPool : public WorkerPoolInterface {
   /// \param[in] env Additional environment variables to be set on this process besides
   /// the environment variables of the parent process.
   /// \param[in] worker_id The WorkerID assigned to this worker process.
+  /// \param[in] numa_bind_spec If set, the forked child pins its CPU affinity and
+  /// preferred NUMA memory node accordingly before exec (Linux only; best effort).
   /// \return An object representing the started worker process.
   virtual std::unique_ptr<ProcessInterface> StartProcess(
       const std::vector<std::string> &worker_command_args,
       const ProcessEnvironment &env,
-      const WorkerID &worker_id);
+      const WorkerID &worker_id,
+      const std::optional<NumaBindSpec> &numa_bind_spec = std::nullopt);
 
   /// Push a warning message to user if worker pool is getting too big.
   virtual void WarnAboutSize();
@@ -928,6 +957,10 @@ class WorkerPool : public WorkerPoolInterface {
   int64_t process_failed_runtime_env_setup_failed_ = 0;
 
   AddProcessToCgroupHook add_to_cgroup_hook_;
+
+  /// Per-GPU NUMA topology of this node, parsed from the --gpu_numa_topology
+  /// raylet flag. Empty when unknown or the feature is disabled (no binding).
+  const std::vector<GpuNumaInfo> gpu_numa_topology_;
 
   /// Ray metrics
   WorkerPoolMetrics worker_pool_metrics_;
